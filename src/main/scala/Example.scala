@@ -1,9 +1,16 @@
 import scodec.bits.ByteVector
 import scalaz.concurrent._
 import scalaz.stream._
-import atto._, Atto._
+import atto._
+import Atto._
 import atto.stream._
 import atto.syntax.stream.all._
+import scala.util.Random._
+import ParseResult._
+import Process.{ await1, emit, emitAll, halt, suspend, await, eval, receive1Or }
+import process1.{ id, scan }
+import scala.languageFeature.postfixOps
+import scala.language.postfixOps
 /*
  * input  ->  |Rubbish|.....|.......|..|......|Rubbish|
  * output ->          |__|__|__|__|__|__|__|__|
@@ -17,19 +24,7 @@ import atto.syntax.stream.all._
  */
 object Example extends App {
 
-  import scala.{ List, Nil }
-  import scala.language._
-  import scala.Predef.{ augmentString }
-  import scalaz.{ Monad, Catchable, \/ }
-  import scalaz.syntax.monad._
-  import scalaz.stream._
-
-  import Atto._
-  import ParseResult._
-  import Process.{ await1, emit, emitAll, halt, suspend, await, eval, receive1Or }
-  import process1.{ id, scan }
-
-  def parseM[A](input:String,p: Parser[A]): Process1[String, A] = {
+  def parseM[A](input: String, p: Parser[A]): Process1[String, A] = {
     def exhaust(r: ParseResult[A], acc: List[A]): (ParseResult[A], List[A]) =
       r match {
         case Done(in, a) => exhaust(p.parse(in), a :: acc)
@@ -48,62 +43,65 @@ object Example extends App {
     go(p.parse(input))
   }
 
-  def stream[A,B](a: Parser[A],b: Parser[B]):Process1[String,B]  = {
-    def go(r: ParseResult[A]): Process1[String,B] =
+  def stream[A, B](a: Parser[A], b: Parser[B]): Process1[String, B] = {
+    def go(r: ParseResult[A]): Process1[String, B] =
       r match {
-        case Partial(_)         => receive1Or[String, B](halt){s => go(r feed s)}
-        case Done(input,result) => parseM(input,b)
-        case f @ Fail(_,_,msg)  => Process.Halt(Cause.Error(new Exception(msg)))
+        case Partial(_)          => receive1Or[String, B](halt) { s => go(r feed s) }
+        case Done(input, result) => parseM(input, b)
+        case f @ Fail(_, _, msg) => Process.Halt(Cause.Error(new Exception(msg)))
       }
     go(a.parse(""))
   }
 
   // l33t complex grammar
-  lazy val cr: Parser[Char]                         = char(0x0D)
-  lazy val lf: Parser[Char]                         = char(0x0A)
-  lazy val eoln                                     = opt(cr) ~ lf
-  lazy val boundary                                 = char('☃')
-  lazy val delimiter                                = boundary ~ eoln
-  lazy val thing                                    = manyUntil(letter,delimiter).map(_.mkString)
-  lazy val preamble                                 = opt(manyUntil(anyChar,delimiter))
-  //Non streaming version
-  //lazy val things                                 = many(thing)
-  //lazy val epilogue                               = opt(skipMany(anyChar))
-  //lazy val complete                               = preamble ~> things <~ epilogue
-  val bufferLength                                  = 6
+  lazy val cr: Parser[Char] = char(0x0D)
+  lazy val lf: Parser[Char] = char(0x0A)
+  lazy val eoln             = opt(cr) ~ lf
+  lazy val boundary         = char('☃')
+  lazy val delimiter        = boundary ~ eoln
+  lazy val thing            = manyUntil(anyChar, delimiter).map(_.mkString)
+  lazy val preamble         = opt(manyUntil(anyChar, delimiter))
+  lazy val bufferLength     = 6
 
-  val input = """this is all rubbish
-               |this is all rubbish☃
-               |A☃
-               |AB☃
-               |ABC☃
-               |ABCD☃
-               |ABCDE☃
-               |ABCDEF☃
-               |ABCDEFG☃
-               |ABCDEFGH☃
-               |this is all rubbish""".stripMargin
+  def buildInput: Process[Task, String] = {
+    
+    val del = """☃
+"""
 
-  lazy val ip: Process[Task, String] = Process.emitAll(input.grouped(bufferLength).toSeq)
+    def rubbish: String = if (nextBoolean()) { nextString(nextInt(45)) } else ""
+    def body: String = {
+      (1 to nextInt(5000)).map { _ =>
+        List.fill(nextInt(1000))(nextPrintableChar()).mkString 
+      }.mkString(del)
+    }
 
-  val toEither: String => Either[Int,String] = s => s.length() % 2 match {
-    case 1 => Right(s)
-    case _ => Right(s)//Left(s.length()) //
+    emit(rubbish + del + body + rubbish) ++ buildInput
   }
 
-  lazy val fromEither: Either[Int,String] => Process[Task,String] = e =>
+  val toEither: String => Either[Int, String] = s => s.length() % 2 match {
+    case 1 => Right(s)
+    case _ => Right(s) //Left(s.length()) //
+  }
+
+  lazy val fromEither: Either[Int, String] => Process[Task, String] = e =>
     e.fold(i => Process.Halt(Cause.End), s => Process.emit(s))
 
-  lazy val output = ip.
+  val logInput: Sink[Task,String] = Process.constant {
+    case input ⇒ Task.delay(println(s"INPUT $input"))
+  }            
+
+  val logOutput: Sink[Task,String] = Process.constant {
+    case output ⇒ Task.delay(println(s"OUTPUT $output"))
+  }    
+  
+  lazy val IVEva = buildInput.
+  //observe(logInput).  
+  flatMap( i => Process.emitAll(i.grouped(bufferLength).toSeq)).
   map(toEither).
   flatMap(fromEither).
-  pipe(stream(preamble,thing)).
-  runLog.
-  run.
-  mkString("\n")
-
-  println(s"output\n$output")
-
-
-
+  pipe(stream(preamble, thing)).
+ // observe(logOutput).
+  run.run
+  
+  IVEva
 }
